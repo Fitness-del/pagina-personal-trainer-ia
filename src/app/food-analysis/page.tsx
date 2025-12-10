@@ -4,9 +4,11 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Camera, Upload, Loader2, Sparkles, AlertCircle, RefreshCw, Crown } from "lucide-react";
+import { Camera, Upload, Loader2, Sparkles, AlertCircle, RefreshCw, Crown, History, Trash2, X } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { Navbar } from "@/components/custom/navbar";
+import { AdminBadge, AdminPanel } from "@/components/AdminBadge";
+import { useProfile } from "@/hooks/useProfile";
 import Image from "next/image";
 import Link from "next/link";
 
@@ -21,96 +23,111 @@ interface NutritionInfo {
   suggestions: string[];
 }
 
-// Limites de análises por plano
-const ANALYSIS_LIMITS = {
-  free: 1, // 1 análise por dia
-  plus: -1, // ilimitado
-  premium: -1 // ilimitado
-};
+interface FoodHistoryItem {
+  id: string;
+  image_url: string;
+  food_name: string;
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+  fiber: number;
+  description: string;
+  suggestions: string[];
+  created_at: string;
+}
 
 export default function FoodAnalysisPage() {
   const router = useRouter();
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [userId, setUserId] = useState<string>("");
-  const [userPlan, setUserPlan] = useState<"free" | "plus" | "premium">("free");
-  const [analysisCount, setAnalysisCount] = useState(0);
-  const [showUpgradePrompt, setShowUpgradePrompt] = useState(false);
+  const { user, profile, isAdmin, isUnlimited, canAnalyze, decrementCredits, loading: profileLoading } = useProfile();
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [result, setResult] = useState<NutritionInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+  const [history, setHistory] = useState<FoodHistoryItem[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [showUpgradePrompt, setShowUpgradePrompt] = useState(false);
 
   useEffect(() => {
-    checkAuth();
-  }, []);
-
-  useEffect(() => {
-    if (userId) {
-      loadAnalysisCount();
-    }
-  }, [userId]);
-
-  const checkAuth = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) {
+    if (!profileLoading && !user) {
       router.push("/login");
-      return;
     }
-    setIsAuthenticated(true);
-    setUserId(user.id);
-    
-    // Buscar plano do usuário (por enquanto assume free, depois integrar com sistema de pagamento)
-    setUserPlan("free");
-  };
+  }, [user, profileLoading, router]);
 
-  const loadAnalysisCount = async () => {
+  useEffect(() => {
+    if (user) {
+      loadHistory();
+    }
+  }, [user]);
+
+  const loadHistory = async () => {
+    if (!user) return;
+    
+    setLoadingHistory(true);
     try {
       const { data, error } = await supabase
-        .from("user_analysis_count")
-        .select("count, last_reset")
-        .eq("user_id", userId)
-        .single();
+        .from("food_analysis_history")
+        .select("*")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false });
 
       if (data) {
-        // Verificar se precisa resetar (novo dia)
-        const lastReset = new Date(data.last_reset);
-        const now = new Date();
-        const isNewDay = lastReset.getDate() !== now.getDate() || 
-                        lastReset.getMonth() !== now.getMonth() ||
-                        lastReset.getFullYear() !== now.getFullYear();
-
-        if (isNewDay) {
-          // Resetar contador
-          await supabase
-            .from("user_analysis_count")
-            .update({ count: 0, last_reset: now.toISOString() })
-            .eq("user_id", userId);
-          setAnalysisCount(0);
-        } else {
-          setAnalysisCount(data.count);
-        }
-      } else {
-        // Criar registro inicial
-        await supabase
-          .from("user_analysis_count")
-          .insert({ user_id: userId, count: 0, last_reset: new Date().toISOString() });
+        setHistory(data);
       }
     } catch (error) {
-      console.log("Erro ao carregar contador de análises");
+      console.log("Erro ao carregar histórico");
+    } finally {
+      setLoadingHistory(false);
     }
   };
 
-  const incrementAnalysisCount = async () => {
-    const newCount = analysisCount + 1;
-    setAnalysisCount(newCount);
+  const saveToHistory = async (imageUrl: string, nutritionInfo: NutritionInfo) => {
+    if (!user) return;
     
     try {
-      await supabase
-        .from("user_analysis_count")
-        .update({ count: newCount })
-        .eq("user_id", userId);
+      const { data, error } = await supabase
+        .from("food_analysis_history")
+        .insert({
+          user_id: user.id,
+          image_url: imageUrl,
+          food_name: nutritionInfo.food_name,
+          calories: nutritionInfo.calories,
+          protein: nutritionInfo.protein,
+          carbs: nutritionInfo.carbs,
+          fat: nutritionInfo.fat,
+          fiber: nutritionInfo.fiber,
+          description: nutritionInfo.description,
+          suggestions: nutritionInfo.suggestions
+        })
+        .select();
+      
+      if (error) {
+        console.error("Erro ao salvar no histórico:", error);
+        throw error;
+      }
+      
+      console.log("✅ Análise salva no histórico com sucesso!", data);
+      
+      // Recarregar histórico
+      await loadHistory();
     } catch (error) {
-      console.log("Erro ao atualizar contador");
+      console.error("❌ Falha ao salvar no histórico:", error);
+      // Não bloquear a análise se falhar ao salvar
+    }
+  };
+
+  const deleteFromHistory = async (id: string) => {
+    try {
+      await supabase
+        .from("food_analysis_history")
+        .delete()
+        .eq("id", id);
+      
+      // Recarregar histórico
+      await loadHistory();
+    } catch (error) {
+      console.log("Erro ao deletar do histórico");
     }
   };
 
@@ -118,9 +135,8 @@ export default function FoodAnalysisPage() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Verificar limite de análises para plano free
-    const limit = ANALYSIS_LIMITS[userPlan];
-    if (limit !== -1 && analysisCount >= limit) {
+    // Verificar se pode analisar (créditos ou ilimitado)
+    if (!canAnalyze) {
       setShowUpgradePrompt(true);
       return;
     }
@@ -147,11 +163,10 @@ export default function FoodAnalysisPage() {
   };
 
   const analyzeFood = async () => {
-    if (!selectedImage) return;
+    if (!selectedImage || !user) return;
 
-    // Verificar limite novamente antes de analisar
-    const limit = ANALYSIS_LIMITS[userPlan];
-    if (limit !== -1 && analysisCount >= limit) {
+    // Verificar se pode analisar
+    if (!canAnalyze) {
       setShowUpgradePrompt(true);
       return;
     }
@@ -183,11 +198,18 @@ export default function FoodAnalysisPage() {
       }
 
       setResult(data as NutritionInfo);
-      await incrementAnalysisCount();
-
-      // Verificar se atingiu o limite após esta análise
-      if (limit !== -1 && analysisCount + 1 >= limit) {
-        setShowUpgradePrompt(true);
+      
+      // Salvar no histórico
+      await saveToHistory(selectedImage, data as NutritionInfo);
+      
+      // Decrementar créditos (se não for ilimitado)
+      if (!isUnlimited) {
+        await decrementCredits();
+        
+        // Verificar se acabaram os créditos
+        if (profile && profile.credits_remaining <= 1) {
+          setShowUpgradePrompt(true);
+        }
       }
     } catch (error) {
       console.error("Erro:", error);
@@ -203,7 +225,22 @@ export default function FoodAnalysisPage() {
     setError(null);
   };
 
-  if (!isAuthenticated) {
+  const viewHistoryItem = (item: FoodHistoryItem) => {
+    setSelectedImage(item.image_url);
+    setResult({
+      food_name: item.food_name,
+      calories: item.calories,
+      protein: item.protein,
+      carbs: item.carbs,
+      fat: item.fat,
+      fiber: item.fiber,
+      description: item.description,
+      suggestions: item.suggestions
+    });
+    setShowHistory(false);
+  };
+
+  if (profileLoading || !user) {
     return (
       <div className="min-h-screen bg-[#0a0a0a] text-white flex items-center justify-center">
         <Loader2 className="w-8 h-8 text-[#00ff88] animate-spin" />
@@ -211,16 +248,20 @@ export default function FoodAnalysisPage() {
     );
   }
 
-  const remainingAnalyses = ANALYSIS_LIMITS[userPlan] === -1 
+  const creditsDisplay = isUnlimited 
     ? "Ilimitadas" 
-    : Math.max(0, ANALYSIS_LIMITS[userPlan] - analysisCount);
+    : `${profile?.credits_remaining || 0} créditos`;
 
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white">
       <Navbar />
+      <AdminBadge />
 
       <div className="pt-24 pb-12 px-4 sm:px-6">
         <div className="container mx-auto max-w-4xl">
+          {/* Admin Panel */}
+          {isAdmin && <AdminPanel />}
+
           {/* Header */}
           <div className="mb-8">
             <div className="flex items-center justify-between mb-2">
@@ -235,38 +276,122 @@ export default function FoodAnalysisPage() {
                     </span>
                   </h1>
                   <p className="text-sm text-gray-400">
-                    {userPlan === "free" 
-                      ? `${remainingAnalyses} análise${remainingAnalyses === 1 ? '' : 's'} restante${remainingAnalyses === 1 ? '' : 's'} hoje` 
-                      : "Análises ilimitadas"}
+                    {creditsDisplay} disponíveis
                   </p>
                 </div>
               </div>
-              {userPlan === "free" && (
-                <Link href="/pricing">
-                  <Button className="bg-gradient-to-r from-[#ffd700] to-[#ff8c00] text-black font-semibold hover:opacity-90">
-                    <Crown className="w-4 h-4 mr-2" />
-                    Upgrade
-                  </Button>
-                </Link>
-              )}
+              <div className="flex gap-3">
+                <Button 
+                  onClick={() => setShowHistory(!showHistory)}
+                  variant="outline"
+                  className="border-[#00ff88]/30 text-white hover:bg-[#00ff88]/10"
+                >
+                  <History className="w-4 h-4 mr-2" />
+                  Histórico ({history.length})
+                </Button>
+                {!isUnlimited && (
+                  <Link href="/pricing">
+                    <Button className="bg-gradient-to-r from-[#ffd700] to-[#ff8c00] text-black font-semibold hover:opacity-90">
+                      <Crown className="w-4 h-4 mr-2" />
+                      Upgrade
+                    </Button>
+                  </Link>
+                )}
+              </div>
             </div>
             <p className="text-gray-400">
               Tira uma foto da tua refeição e descobre as calorias e informação nutricional detalhada
             </p>
           </div>
 
+          {/* History Modal */}
+          {showHistory && (
+            <Card className="bg-[#1a1a1a] border-[#00ff88]/20 p-6 mb-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-2xl font-bold flex items-center gap-2">
+                  <History className="w-6 h-6 text-[#00ff88]" />
+                  Histórico de Análises
+                </h2>
+                <Button
+                  onClick={() => setShowHistory(false)}
+                  variant="ghost"
+                  size="sm"
+                  className="text-gray-400 hover:text-white"
+                >
+                  <X className="w-5 h-5" />
+                </Button>
+              </div>
+
+              {loadingHistory ? (
+                <div className="text-center py-8">
+                  <Loader2 className="w-8 h-8 text-[#00ff88] animate-spin mx-auto" />
+                </div>
+              ) : history.length === 0 ? (
+                <div className="text-center py-8 text-gray-400">
+                  <Camera className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                  <p>Ainda não tens análises no histórico</p>
+                </div>
+              ) : (
+                <div className="grid md:grid-cols-2 gap-4 max-h-[600px] overflow-y-auto">
+                  {history.map((item) => (
+                    <Card 
+                      key={item.id}
+                      className="bg-[#0f0f0f] border-[#00ff88]/10 overflow-hidden hover:border-[#00ff88]/30 transition-all cursor-pointer group"
+                    >
+                      <div className="relative h-40">
+                        <Image
+                          src={item.image_url}
+                          alt={item.food_name}
+                          fill
+                          className="object-cover"
+                        />
+                        <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
+                          <Button
+                            onClick={() => viewHistoryItem(item)}
+                            size="sm"
+                            className="bg-[#00ff88] text-black hover:bg-[#00d4ff]"
+                          >
+                            Ver Detalhes
+                          </Button>
+                          <Button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (confirm("Tens certeza que queres eliminar esta análise?")) {
+                                deleteFromHistory(item.id);
+                              }
+                            }}
+                            size="sm"
+                            variant="destructive"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="p-4">
+                        <h3 className="font-bold text-[#00ff88] mb-2">{item.food_name}</h3>
+                        <div className="flex items-center justify-between text-sm text-gray-400">
+                          <span>{item.calories} cal</span>
+                          <span>{new Date(item.created_at).toLocaleDateString('pt-PT')}</span>
+                        </div>
+                      </div>
+                    </Card>
+                  ))}
+                </div>
+              )}
+            </Card>
+          )}
+
           {/* Upgrade Prompt */}
-          {showUpgradePrompt && (
+          {showUpgradePrompt && !isUnlimited && (
             <Card className="bg-gradient-to-r from-[#ffd700]/20 to-[#ff8c00]/20 border-[#ffd700]/50 p-6 mb-6">
               <div className="flex items-start gap-4">
                 <AlertCircle className="w-6 h-6 text-[#ffd700] flex-shrink-0 mt-1" />
                 <div className="flex-1">
                   <h3 className="text-xl font-bold mb-2 text-[#ffd700]">
-                    Atingiste o Limite Diário!
+                    Sem Créditos Disponíveis!
                   </h3>
                   <p className="text-gray-300 mb-4">
-                    Esgotaste a {ANALYSIS_LIMITS.free} análise diária do plano Free. 
-                    Quer continuar a analisar as tuas refeições e ter acesso ilimitado?
+                    Esgotaste os teus créditos. Quer continuar a analisar as tuas refeições e ter acesso ilimitado?
                   </p>
                   <div className="flex gap-3">
                     <Link href="/pricing">
@@ -305,7 +430,7 @@ export default function FoodAnalysisPage() {
                   <Button
                     className="bg-gradient-to-r from-[#00ff88] to-[#00d4ff] text-black font-semibold hover:opacity-90"
                     asChild
-                    disabled={ANALYSIS_LIMITS[userPlan] !== -1 && analysisCount >= ANALYSIS_LIMITS[userPlan]}
+                    disabled={!canAnalyze}
                   >
                     <span className="cursor-pointer">
                       <Upload className="w-5 h-5 mr-2" />
@@ -319,7 +444,7 @@ export default function FoodAnalysisPage() {
                   accept="image/*"
                   onChange={handleImageSelect}
                   className="hidden"
-                  disabled={ANALYSIS_LIMITS[userPlan] !== -1 && analysisCount >= ANALYSIS_LIMITS[userPlan]}
+                  disabled={!canAnalyze}
                 />
 
                 <p className="text-xs text-gray-500 mt-4">
@@ -345,7 +470,7 @@ export default function FoodAnalysisPage() {
                 <div className="flex gap-3">
                   <Button
                     onClick={analyzeFood}
-                    disabled={analyzing || (ANALYSIS_LIMITS[userPlan] !== -1 && analysisCount >= ANALYSIS_LIMITS[userPlan])}
+                    disabled={analyzing || !canAnalyze}
                     className="flex-1 bg-gradient-to-r from-[#00ff88] to-[#00d4ff] text-black font-semibold hover:opacity-90"
                   >
                     {analyzing ? (
@@ -455,7 +580,7 @@ export default function FoodAnalysisPage() {
                     <Button
                       onClick={resetAnalysis}
                       className="w-full bg-gradient-to-r from-[#00ff88] to-[#00d4ff] text-black font-semibold hover:opacity-90"
-                      disabled={ANALYSIS_LIMITS[userPlan] !== -1 && analysisCount >= ANALYSIS_LIMITS[userPlan]}
+                      disabled={!canAnalyze}
                     >
                       <Camera className="w-5 h-5 mr-2" />
                       Analisar Outra Refeição
@@ -486,7 +611,7 @@ export default function FoodAnalysisPage() {
                 Os valores são estimativas profissionais baseadas em análise visual. Podem variar conforme porções reais
               </p>
             </Card>
-            <Card className="bg-[#1a1a1a] border-[#00ff88]/20 p-6">
+            <Card className="bg-[#1a1a1a] border-[#00d4ff]/20 p-6">
               <h3 className="font-bold mb-2 flex items-center gap-2">
                 <span className="text-xl">💪</span>
                 Dica Pro
